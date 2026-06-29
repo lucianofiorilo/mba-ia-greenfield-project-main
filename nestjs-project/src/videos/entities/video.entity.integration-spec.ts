@@ -49,7 +49,10 @@ describe('Video entity (integration)', () => {
     );
   }
 
-  function buildVideo(channelId: string, overrides: Partial<Video> = {}): Video {
+  function buildVideo(
+    channelId: string,
+    overrides: Partial<Video> = {},
+  ): Video {
     return videoRepository.create({
       public_id: randomUUID().slice(0, 11),
       channel_id: channelId,
@@ -96,7 +99,11 @@ describe('Video entity (integration)', () => {
     );
 
     const found = await videoRepository.findOneByOrFail({ id: saved.id });
-    expect(found.metadata).toEqual({ width: 1920, height: 1080, codec: 'h264' });
+    expect(found.metadata).toEqual({
+      width: 1920,
+      height: 1080,
+      codec: 'h264',
+    });
     expect(found.duration_seconds).toBe(12.5);
     expect(found.status).toBe(VideoStatus.READY);
   });

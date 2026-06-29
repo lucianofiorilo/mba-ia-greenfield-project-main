@@ -1,7 +1,7 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 4/12 completed
+**SIs:** 5/12 completed
 
 ### SI-03.1 — Dependencies, Configuration Namespaces, and Env Validation
 - **Status:** completed
@@ -32,9 +32,13 @@
   - Extended `migrations.integration-spec.ts` for the 3rd migration (CreateVideos) and made its `beforeAll` drop the managed enum types (`DROP TYPE IF EXISTS ... CASCADE`) — `DROP TABLE CASCADE` does not remove standalone enum types, so this prevents "type already exists" when a prior synchronize suite created them.
 
 ### SI-03.5 — Videos Module, Domain Exceptions, and Queue Registration
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** videos.module.spec.ts (1, compilation) + channels.service.integration-spec.ts findByUserId (2) — passing; full unit+integration suite 159/159 green
+- **Observations:**
+  - `VideosService`/`VideosController` created as shells here (constructor + DI only); behavior methods/routes are added in SI-03.6+. `BullModule.forRootAsync` (Redis) registered in `AppModule`.
+  - **Ripple 1 (inverse relation):** adding `Channel.videos` `@OneToMany` requires `Video` in every test DataSource that registers `Channel` — added `Video` to 10 inherited Phase 02 test entity lists (otherwise `initialize()` throws "metadata for Channel#videos not found").
+  - **Ripple 2 (required env):** making `S3_*` required in the Joi schema broke the inherited `env.validation.integration-spec.ts` (its `requiredEnv` lacked S3) — added the S3 vars to its baseline.
+  - **Lint debt (user decision):** the inherited Phase 02 code already failed `npm run lint` (150 errors from `recommendedTypeChecked` on `any` in test files). Per user choice, added an eslint override exempting test files (`*.spec.ts`/`*.integration-spec.ts`/`*.e2e-spec.ts`/`src/test/**`) from the type-aware safety rules; production `src` stays fully checked. Also fixed the one production offender properly: `channels.service.ts` now reads `err.driverError.code/detail` (correct TypeORM shape) instead of `err as any` — unit-test mock updated to wrap the driver error accordingly. Lint now exits 0.
 
 ### SI-03.6 — Upload Initiation (draft pre-register + multipart presigned URLs)
 - **Status:** pending
