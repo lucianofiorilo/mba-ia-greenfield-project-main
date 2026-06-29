@@ -21,4 +21,18 @@ export const envValidationSchema = Joi.object({
   MAIL_PORT: Joi.number().default(1025),
   MAIL_FROM: Joi.string().default('"StreamTube" <noreply@streamtube.com>'),
   SWAGGER_ENABLED: Joi.string().valid('true', 'false').default('false'),
+  // Object storage (S3 / MinIO)
+  S3_ENDPOINT: Joi.string().uri().required(),
+  S3_REGION: Joi.string().default('us-east-1'),
+  S3_ACCESS_KEY: Joi.string().required(),
+  S3_SECRET_KEY: Joi.string().required(),
+  S3_BUCKET: Joi.string().default('streamtube-videos'),
+  S3_FORCE_PATH_STYLE: Joi.string().valid('true', 'false').default('true'),
+  // Queue (Redis / BullMQ)
+  REDIS_HOST: Joi.string().default('redis'),
+  REDIS_PORT: Joi.number().port().default(6379),
+  // Upload limits
+  UPLOAD_PART_SIZE_BYTES: Joi.number().default(67108864),
+  UPLOAD_MAX_SIZE_BYTES: Joi.number().default(10737418240),
+  UPLOAD_URL_EXPIRES_SECONDS: Joi.number().default(900),
 });
