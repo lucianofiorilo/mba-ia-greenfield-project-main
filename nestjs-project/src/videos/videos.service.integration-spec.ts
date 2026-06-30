@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigType } from '@nestjs/config';
 import { TypeOrmModule, getRepositoryToken } from '@nestjs/typeorm';
-import { getQueueToken } from '@nestjs/bullmq';
+import { BullModule, getQueueToken } from '@nestjs/bullmq';
+import type { Queue } from 'bullmq';
 import { DataSource, Repository } from 'typeorm';
 import { VideosService } from './videos.service';
 import { Video, VideoStatus } from './entities/video.entity';
@@ -16,6 +17,7 @@ import { VIDEO_PROCESSING_QUEUE } from './videos.constants';
 import storageConfig from '../config/storage.config';
 import uploadConfig from '../config/upload.config';
 import appConfig from '../config/app.config';
+import queueConfig from '../config/queue.config';
 import {
   cleanAllTables,
   createTestDataSource,
@@ -24,45 +26,52 @@ import {
 const ENTITIES = [User, Channel, Video, RefreshToken, VerificationToken];
 
 describe('VideosService (integration)', () => {
+  let moduleRef: TestingModule;
   let service: VideosService;
   let dataSource: DataSource;
   let videoRepository: Repository<Video>;
+  let queue: Queue;
   let userId: string;
   let channelId: string;
 
   beforeAll(async () => {
     const ds = createTestDataSource(ENTITIES);
-    const module: TestingModule = await Test.createTestingModule({
+    moduleRef = await Test.createTestingModule({
       imports: [
         ConfigModule.forRoot({
           isGlobal: true,
-          load: [storageConfig, uploadConfig, appConfig],
+          load: [storageConfig, uploadConfig, appConfig, queueConfig],
         }),
         TypeOrmModule.forRoot(ds.options),
         TypeOrmModule.forFeature([Video]),
+        // Real Redis-backed queue — BullMQ is a configured lib, not mocked.
+        BullModule.forRootAsync({
+          inject: [queueConfig.KEY],
+          useFactory: (cfg: ConfigType<typeof queueConfig>) => ({
+            connection: { host: cfg.redisHost, port: cfg.redisPort },
+          }),
+        }),
+        BullModule.registerQueue({ name: VIDEO_PROCESSING_QUEUE }),
         StorageModule,
         ChannelsModule,
       ],
-      providers: [
-        VideosService,
-        // The queue is not exercised by initiateUpload — stub the token so DI
-        // resolves without a live Redis connection.
-        { provide: getQueueToken(VIDEO_PROCESSING_QUEUE), useValue: {} },
-      ],
+      providers: [VideosService],
     }).compile();
-    await module.init();
+    await moduleRef.init();
 
-    service = module.get(VideosService);
-    dataSource = module.get(DataSource);
-    videoRepository = module.get(getRepositoryToken(Video));
+    service = moduleRef.get(VideosService);
+    dataSource = moduleRef.get(DataSource);
+    videoRepository = moduleRef.get(getRepositoryToken(Video));
+    queue = moduleRef.get(getQueueToken(VIDEO_PROCESSING_QUEUE));
   });
 
   afterAll(async () => {
-    await dataSource.destroy();
+    await moduleRef.close();
   });
 
   beforeEach(async () => {
     await cleanAllTables(dataSource);
+    await queue.obliterate({ force: true });
 
     const user = await dataSource.getRepository(User).save(
       dataSource.getRepository(User).create({
@@ -116,5 +125,63 @@ describe('VideosService (integration)', () => {
     const second = await service.initiateUpload(userId, dto);
 
     expect(first.publicId).not.toBe(second.publicId);
+  });
+
+  // Initiate, upload the single part to MinIO, and return the part ETag.
+  async function initiateAndUploadOnePart(
+    body = 'hello world',
+  ): Promise<{ publicId: string; etag: string }> {
+    const init = await service.initiateUpload(userId, {
+      title: 'Completable clip',
+      filename: 'clip.mp4',
+      mimeType: 'video/mp4',
+      sizeBytes: body.length,
+    });
+    const put = await fetch(init.parts[0].url, { method: 'PUT', body });
+    expect(put.ok).toBe(true);
+    const etag = put.headers.get('etag');
+    expect(etag).toBeTruthy();
+    return { publicId: init.publicId, etag: etag as string };
+  }
+
+  it('completes the upload, transitions to processing, and enqueues a job', async () => {
+    const { publicId, etag } = await initiateAndUploadOnePart();
+
+    const result = await service.completeUpload(userId, publicId, {
+      parts: [{ partNumber: 1, etag }],
+    });
+
+    expect(result).toEqual({ publicId, status: VideoStatus.PROCESSING });
+
+    const persisted = await videoRepository.findOne({
+      where: { public_id: publicId },
+    });
+    expect(persisted?.status).toBe(VideoStatus.PROCESSING);
+
+    const jobs = await queue.getJobs([
+      'waiting',
+      'delayed',
+      'active',
+      'prioritized',
+    ]);
+    const job = jobs.find((j) => j.data?.videoId === persisted?.id);
+    expect(job).toBeDefined();
+    expect(job?.data).toEqual({ videoId: persisted?.id });
+  });
+
+  it('aborts the upload and deletes the draft row', async () => {
+    const init = await service.initiateUpload(userId, {
+      title: 'Abortable clip',
+      filename: 'clip.mp4',
+      mimeType: 'video/mp4',
+      sizeBytes: 1_000,
+    });
+
+    await service.abortUpload(userId, init.publicId);
+
+    const persisted = await videoRepository.findOne({
+      where: { public_id: init.publicId },
+    });
+    expect(persisted).toBeNull();
   });
 });

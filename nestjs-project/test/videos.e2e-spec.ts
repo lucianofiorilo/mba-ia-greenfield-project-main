@@ -144,4 +144,137 @@ describe('Videos (e2e)', () => {
       expect(res.body.error).toBe('FILE_TOO_LARGE');
     });
   });
+
+  // Initiate an upload over HTTP, then PUT the single part directly to MinIO
+  // (presigned URL) and return its ETag — mirrors the real client flow.
+  async function initiateAndUpload(
+    accessToken: string,
+    body = 'hello world',
+  ): Promise<{
+    publicId: string;
+    parts: { partNumber: number; etag: string }[];
+  }> {
+    const init = await request(app.getHttpServer())
+      .post('/videos')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ ...VALID_BODY, sizeBytes: body.length })
+      .expect(201);
+    const put = await fetch(init.body.parts[0].url, { method: 'PUT', body });
+    expect(put.ok).toBe(true);
+    const etag = put.headers.get('etag');
+    expect(etag).toBeTruthy();
+    return {
+      publicId: init.body.publicId,
+      parts: [{ partNumber: 1, etag: etag as string }],
+    };
+  }
+
+  describe('POST /videos/:publicId/complete', () => {
+    it('returns 200 { status: processing } for the owner with valid parts', async () => {
+      const token = await registerConfirmAndLogin('complete-ok@example.com');
+      const { publicId, parts } = await initiateAndUpload(token);
+
+      const res = await request(app.getHttpServer())
+        .post(`/videos/${publicId}/complete`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ parts })
+        .expect(200);
+
+      expect(res.body).toEqual({ publicId, status: 'processing' });
+    });
+
+    it('returns 403 VIDEO_ACCESS_DENIED for a non-owner', async () => {
+      const owner = await registerConfirmAndLogin('complete-owner@example.com');
+      const { publicId, parts } = await initiateAndUpload(owner);
+      const intruder = await registerConfirmAndLogin('complete-x@example.com');
+
+      const res = await request(app.getHttpServer())
+        .post(`/videos/${publicId}/complete`)
+        .set('Authorization', `Bearer ${intruder}`)
+        .send({ parts })
+        .expect(403);
+
+      expect(res.body.error).toBe('VIDEO_ACCESS_DENIED');
+    });
+
+    it('returns 409 INVALID_VIDEO_STATE when the video is no longer a draft', async () => {
+      const token = await registerConfirmAndLogin('complete-twice@example.com');
+      const { publicId, parts } = await initiateAndUpload(token);
+
+      await request(app.getHttpServer())
+        .post(`/videos/${publicId}/complete`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ parts })
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .post(`/videos/${publicId}/complete`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ parts })
+        .expect(409);
+
+      expect(res.body.error).toBe('INVALID_VIDEO_STATE');
+    });
+
+    it('returns 404 VIDEO_NOT_FOUND for an unknown publicId', async () => {
+      const token = await registerConfirmAndLogin('complete-404@example.com');
+
+      const res = await request(app.getHttpServer())
+        .post('/videos/doesnotexist/complete')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ parts: [{ partNumber: 1, etag: 'x' }] })
+        .expect(404);
+
+      expect(res.body.error).toBe('VIDEO_NOT_FOUND');
+    });
+
+    it('returns 401 without an access token', async () => {
+      await request(app.getHttpServer())
+        .post('/videos/whatever/complete')
+        .send({ parts: [{ partNumber: 1, etag: 'x' }] })
+        .expect(401);
+    });
+  });
+
+  describe('POST /videos/:publicId/abort', () => {
+    it('returns 204 and removes the draft for the owner', async () => {
+      const token = await registerConfirmAndLogin('abort-ok@example.com');
+      const init = await request(app.getHttpServer())
+        .post('/videos')
+        .set('Authorization', `Bearer ${token}`)
+        .send(VALID_BODY)
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`/videos/${init.body.publicId}/abort`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(204);
+
+      // Draft is gone — a follow-up operation can no longer find it.
+      const res = await request(app.getHttpServer())
+        .post(`/videos/${init.body.publicId}/complete`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ parts: [{ partNumber: 1, etag: 'x' }] })
+        .expect(404);
+
+      expect(res.body.error).toBe('VIDEO_NOT_FOUND');
+    });
+
+    it('returns 403 VIDEO_ACCESS_DENIED for a non-owner', async () => {
+      const owner = await registerConfirmAndLogin('abort-owner@example.com');
+      const init = await request(app.getHttpServer())
+        .post('/videos')
+        .set('Authorization', `Bearer ${owner}`)
+        .send(VALID_BODY)
+        .expect(201);
+      const intruder = await registerConfirmAndLogin('abort-x@example.com');
+
+      const res = await request(app.getHttpServer())
+        .post(`/videos/${init.body.publicId}/abort`)
+        .set('Authorization', `Bearer ${intruder}`)
+        .expect(403);
+
+      expect(res.body.error).toBe('VIDEO_ACCESS_DENIED');
+    });
+  });
 });

@@ -3,15 +3,23 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { getQueueToken } from '@nestjs/bullmq';
 import { QueryFailedError } from 'typeorm';
 import { VideosService } from './videos.service';
-import { Video } from './entities/video.entity';
+import { Video, VideoStatus } from './entities/video.entity';
 import { StorageService } from '../storage/storage.service';
 import { ChannelsService } from '../channels/channels.service';
 import { ChannelNotFoundException } from '../channels/exceptions/channel.exceptions';
 import {
   FileTooLargeException,
+  InvalidUploadException,
+  InvalidVideoStateException,
   UnsupportedMediaTypeException,
+  VideoAccessDeniedException,
+  VideoNotFoundException,
 } from './exceptions/video.exceptions';
-import { VIDEO_PROCESSING_QUEUE } from './videos.constants';
+import {
+  VIDEO_JOB_OPTIONS,
+  VIDEO_PROCESS_JOB,
+  VIDEO_PROCESSING_QUEUE,
+} from './videos.constants';
 import uploadConfig from '../config/upload.config';
 import appConfig from '../config/app.config';
 import type { InitiateUploadDto } from './dto/initiate-upload.dto';
@@ -36,22 +44,38 @@ function validDto(
 
 describe('VideosService (unit)', () => {
   let service: VideosService;
-  let repository: { insert: jest.Mock };
+  let repository: {
+    insert: jest.Mock;
+    findOne: jest.Mock;
+    save: jest.Mock;
+    delete: jest.Mock;
+  };
   let storageService: {
     createMultipartUpload: jest.Mock;
     presignUploadParts: jest.Mock;
+    completeMultipartUpload: jest.Mock;
+    abortMultipartUpload: jest.Mock;
   };
   let channelsService: { findByUserId: jest.Mock };
+  let queue: { add: jest.Mock };
 
   beforeEach(async () => {
-    repository = { insert: jest.fn().mockResolvedValue(undefined) };
+    repository = {
+      insert: jest.fn().mockResolvedValue(undefined),
+      findOne: jest.fn(),
+      save: jest.fn((v) => Promise.resolve(v)),
+      delete: jest.fn().mockResolvedValue(undefined),
+    };
     storageService = {
       createMultipartUpload: jest.fn().mockResolvedValue('upload-123'),
       presignUploadParts: jest.fn().mockResolvedValue([]),
+      completeMultipartUpload: jest.fn().mockResolvedValue(undefined),
+      abortMultipartUpload: jest.fn().mockResolvedValue(undefined),
     };
     channelsService = {
       findByUserId: jest.fn().mockResolvedValue({ id: 'channel-1' }),
     };
+    queue = { add: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -59,7 +83,7 @@ describe('VideosService (unit)', () => {
         { provide: getRepositoryToken(Video), useValue: repository },
         { provide: StorageService, useValue: storageService },
         { provide: ChannelsService, useValue: channelsService },
-        { provide: getQueueToken(VIDEO_PROCESSING_QUEUE), useValue: {} },
+        { provide: getQueueToken(VIDEO_PROCESSING_QUEUE), useValue: queue },
         { provide: uploadConfig.KEY, useValue: UPLOAD_CONFIG },
         { provide: appConfig.KEY, useValue: { url: 'http://localhost:3000' } },
       ],
@@ -139,6 +163,132 @@ describe('VideosService (unit)', () => {
       key: expect.stringContaining('videos/'),
       partSize: 100,
       parts: [{ partNumber: 1, url: 'https://minio/part-1' }],
+    });
+  });
+
+  describe('completeUpload', () => {
+    const draft = (): Partial<Video> => ({
+      id: 'video-uuid',
+      public_id: 'pub123',
+      channel_id: 'channel-1',
+      status: VideoStatus.DRAFT,
+      storage_key: 'videos/video-uuid/original/clip.mp4',
+      upload_id: 'upload-123',
+    });
+    const parts = [{ partNumber: 1, etag: 'etag-1' }];
+
+    it('throws VideoNotFoundException when the video does not exist', async () => {
+      repository.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.completeUpload('user-1', 'missing', { parts }),
+      ).rejects.toThrow(VideoNotFoundException);
+    });
+
+    it('throws VideoAccessDeniedException when the caller is not the owner', async () => {
+      repository.findOne.mockResolvedValue(draft());
+      channelsService.findByUserId.mockResolvedValue({ id: 'other-channel' });
+
+      await expect(
+        service.completeUpload('user-1', 'pub123', { parts }),
+      ).rejects.toThrow(VideoAccessDeniedException);
+      expect(storageService.completeMultipartUpload).not.toHaveBeenCalled();
+    });
+
+    it('throws InvalidVideoStateException when the video is not a draft', async () => {
+      repository.findOne.mockResolvedValue({
+        ...draft(),
+        status: VideoStatus.PROCESSING,
+      });
+
+      await expect(
+        service.completeUpload('user-1', 'pub123', { parts }),
+      ).rejects.toThrow(InvalidVideoStateException);
+    });
+
+    it('completes storage, flips to processing, and enqueues the job', async () => {
+      repository.findOne.mockResolvedValue(draft());
+
+      const result = await service.completeUpload('user-1', 'pub123', {
+        parts,
+      });
+
+      expect(storageService.completeMultipartUpload).toHaveBeenCalledWith(
+        'videos/video-uuid/original/clip.mp4',
+        'upload-123',
+        parts,
+      );
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ status: VideoStatus.PROCESSING }),
+      );
+      expect(queue.add).toHaveBeenCalledWith(
+        VIDEO_PROCESS_JOB,
+        { videoId: 'video-uuid' },
+        VIDEO_JOB_OPTIONS,
+      );
+      expect(result).toEqual({
+        publicId: 'pub123',
+        status: VideoStatus.PROCESSING,
+      });
+    });
+
+    it('maps an invalid-parts storage error to InvalidUploadException', async () => {
+      repository.findOne.mockResolvedValue(draft());
+      storageService.completeMultipartUpload.mockRejectedValue({
+        name: 'InvalidPart',
+        $metadata: { httpStatusCode: 400 },
+      });
+
+      await expect(
+        service.completeUpload('user-1', 'pub123', { parts }),
+      ).rejects.toThrow(InvalidUploadException);
+      expect(queue.add).not.toHaveBeenCalled();
+    });
+
+    it('rethrows non-client storage errors without enqueueing', async () => {
+      repository.findOne.mockResolvedValue(draft());
+      const networkError = Object.assign(new Error('socket hang up'), {
+        $metadata: { httpStatusCode: 500 },
+      });
+      storageService.completeMultipartUpload.mockRejectedValue(networkError);
+
+      await expect(
+        service.completeUpload('user-1', 'pub123', { parts }),
+      ).rejects.toThrow('socket hang up');
+      expect(queue.add).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('abortUpload', () => {
+    const draft = (): Partial<Video> => ({
+      id: 'video-uuid',
+      public_id: 'pub123',
+      channel_id: 'channel-1',
+      status: VideoStatus.DRAFT,
+      storage_key: 'videos/video-uuid/original/clip.mp4',
+      upload_id: 'upload-123',
+    });
+
+    it('throws VideoAccessDeniedException for a non-owner', async () => {
+      repository.findOne.mockResolvedValue(draft());
+      channelsService.findByUserId.mockResolvedValue({ id: 'other-channel' });
+
+      await expect(service.abortUpload('user-1', 'pub123')).rejects.toThrow(
+        VideoAccessDeniedException,
+      );
+      expect(storageService.abortMultipartUpload).not.toHaveBeenCalled();
+    });
+
+    it('aborts the multipart upload and deletes the draft row', async () => {
+      repository.findOne.mockResolvedValue(draft());
+
+      await service.abortUpload('user-1', 'pub123');
+
+      expect(storageService.abortMultipartUpload).toHaveBeenCalledWith(
+        'videos/video-uuid/original/clip.mp4',
+        'upload-123',
+      );
+      expect(repository.delete).toHaveBeenCalledWith({ id: 'video-uuid' });
     });
   });
 });

@@ -16,16 +16,23 @@ import { ChannelsService } from '../channels/channels.service';
 import { ChannelNotFoundException } from '../channels/exceptions/channel.exceptions';
 import {
   FileTooLargeException,
+  InvalidUploadException,
+  InvalidVideoStateException,
   UnsupportedMediaTypeException,
+  VideoAccessDeniedException,
+  VideoNotFoundException,
 } from './exceptions/video.exceptions';
 import {
   MAX_PUBLIC_ID_RETRIES,
   PG_UNIQUE_VIOLATION,
   PUBLIC_ID_LENGTH,
+  VIDEO_JOB_OPTIONS,
   VIDEO_MIME_PREFIX,
+  VIDEO_PROCESS_JOB,
   VIDEO_PROCESSING_QUEUE,
 } from './videos.constants';
 import type { InitiateUploadDto } from './dto/initiate-upload.dto';
+import type { CompleteUploadDto } from './dto/complete-upload.dto';
 import uploadConfig from '../config/upload.config';
 import appConfig from '../config/app.config';
 
@@ -42,6 +49,28 @@ function isUniqueViolation(err: unknown): boolean {
     err instanceof QueryFailedError &&
     (err.driverError as { code?: string }).code === PG_UNIQUE_VIOLATION
   );
+}
+
+// S3/MinIO client-side errors that mean the supplied parts are unusable —
+// mapped to a 400 InvalidUploadException; anything else (network, 5xx) bubbles.
+const INVALID_UPLOAD_ERROR_NAMES = new Set([
+  'InvalidPart',
+  'InvalidPartOrder',
+  'EntityTooSmall',
+  'NoSuchUpload',
+  'MalformedXML',
+]);
+
+function isInvalidPartsError(err: unknown): boolean {
+  const e = err as {
+    name?: string;
+    $metadata?: { httpStatusCode?: number };
+  };
+  if (typeof e?.name === 'string' && INVALID_UPLOAD_ERROR_NAMES.has(e.name)) {
+    return true;
+  }
+  const status = e?.$metadata?.httpStatusCode;
+  return typeof status === 'number' && status >= 400 && status < 500;
 }
 
 @Injectable()
@@ -144,5 +173,80 @@ export class VideosService {
     }
     // Unreachable: the loop either returns a publicId or rethrows.
     throw new Error('Could not generate a unique public_id');
+  }
+
+  /**
+   * Finalize the multipart upload, flip the draft to `processing`, and enqueue
+   * the processing job. Owner-only; the video must still be a `draft`.
+   */
+  async completeUpload(
+    userId: string,
+    publicId: string,
+    dto: CompleteUploadDto,
+  ): Promise<{ publicId: string; status: VideoStatus }> {
+    const video = await this.loadOwnedDraft(userId, publicId);
+
+    try {
+      await this.storageService.completeMultipartUpload(
+        video.storage_key,
+        video.upload_id as string,
+        dto.parts,
+      );
+    } catch (err) {
+      if (isInvalidPartsError(err)) {
+        throw new InvalidUploadException();
+      }
+      throw err;
+    }
+
+    video.status = VideoStatus.PROCESSING;
+    await this.videoRepository.save(video);
+    await this.queue.add(
+      VIDEO_PROCESS_JOB,
+      { videoId: video.id },
+      VIDEO_JOB_OPTIONS,
+    );
+
+    return { publicId: video.public_id, status: video.status };
+  }
+
+  /**
+   * Abort the multipart upload and delete the draft row. Owner-only; the video
+   * must still be a `draft`.
+   */
+  async abortUpload(userId: string, publicId: string): Promise<void> {
+    const video = await this.loadOwnedDraft(userId, publicId);
+
+    if (video.upload_id) {
+      await this.storageService.abortMultipartUpload(
+        video.storage_key,
+        video.upload_id,
+      );
+    }
+    await this.videoRepository.delete({ id: video.id });
+  }
+
+  /**
+   * Load a video by `public_id` and assert the caller owns it and it is still
+   * a draft — the shared precondition for both completion and abort.
+   */
+  private async loadOwnedDraft(
+    userId: string,
+    publicId: string,
+  ): Promise<Video> {
+    const video = await this.videoRepository.findOne({
+      where: { public_id: publicId },
+    });
+    if (!video) {
+      throw new VideoNotFoundException();
+    }
+    const channel = await this.channelsService.findByUserId(userId);
+    if (!channel || channel.id !== video.channel_id) {
+      throw new VideoAccessDeniedException();
+    }
+    if (video.status !== VideoStatus.DRAFT) {
+      throw new InvalidVideoStateException();
+    }
+    return video;
   }
 }
