@@ -1,17 +1,24 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 7/12 completed
+**SIs:** 8/12 completed
 
-> **Resume next session at SI-03.8 (Worker Bootstrap).** The producer side is
-> complete: the API initiates uploads, completes/aborts them, and enqueues
-> `video-processing` jobs — but no consumer exists yet, so jobs accumulate in
-> Redis unprocessed. Next is the standalone worker entrypoint (03.8), then the
-> FFmpeg processor (03.9), then the read endpoints (03.10 metadata, 03.11
-> stream/Range, 03.12 download). DoD is green through SI-03.7: `tsc` clean,
-> lint 0, 177 unit/integration, 64 e2e. Docker stack (db/redis/minio/api) must
-> be up before implementing/testing; run e2e with `npm run test:e2e` (now
-> `--runInBand` + `testTimeout: 30000`).
+> **Resume next session at SI-03.9 (Video Processing Processor).** The worker
+> now boots (03.8): a standalone Nest context consumes-side is wired, connects
+> to DB/Redis/MinIO and stays alive on the `video-processing` queue — but there
+> is still **no `@Processor`**, so enqueued jobs are not yet consumed. Next is
+> the FFmpeg processor (03.9: metadata + thumbnail + status lifecycle, added as
+> a provider in `WorkerModule`), then the read endpoints (03.10 metadata, 03.11
+> stream/Range, 03.12 download). DoD is green through SI-03.8: `tsc` clean,
+> lint 0, 178 unit/integration, 64 e2e. Docker stack (db/redis/minio/api +
+> **video-worker**) must be up before implementing/testing; the worker
+> autostarts via its Compose `command: npm run start:worker`. Run e2e with
+> `npm run test:e2e` (`--runInBand` + `testTimeout: 30000`).
+>
+> Note: the full unit+integration run flaked once on `auth.service.integration-spec`
+> (`DataSource.initialize` failed in `beforeAll` under load with the worker
+> holding connections) — passed clean on isolated and full re-run. Known
+> single-shared-DB integration flakiness, not a regression.
 >
 > Branch `feature/phase-03-videos`; commits not yet pushed to `origin`.
 
@@ -72,9 +79,13 @@
   - The integration test switched the stubbed queue for a **real BullMQ** (`BullModule.forRootAsync` + `registerQueue`, `queueConfig`) — BullMQ is a configured lib and is not mocked (testing-guide §1). It uploads a real part to MinIO via global `fetch` (Node 25) to obtain a genuine ETag before completing. `moduleRef.close()` in `afterAll` closes the Redis + DB connections; the queue is obliterated in `beforeEach`.
 
 ### SI-03.8 — Worker Bootstrap (standalone entrypoint)
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** unit `worker.module.spec.ts` (1, compilation) — resolves `DataSource`, the registered `video-processing` queue token, and `StorageService`; full unit+integration 178/178 + e2e 64/64 green
+- **Observations:**
+  - `src/worker.ts` boots `NestFactory.createApplicationContext(WorkerModule)` (no `app.listen()`); the open DB pool + Redis/BullMQ handles keep the process alive; `enableShutdownHooks()` closes them on SIGTERM/SIGINT. Verified live: worker logs `Video worker started`, connects to db/redis/minio, stays `Up` with no HTTP port.
+  - `WorkerModule` mirrors `AppModule`'s infra (global `ConfigModule` + Joi validation, `TypeOrmModule.forRootAsync` same factory, `BullModule.forRootAsync`) but loads only the namespaces the processor needs (`database`, `queue`, `storage`, `upload`) — no auth/mail/swagger. Registers `BullModule.registerQueue({ VIDEO_PROCESSING_QUEUE })` + `StorageModule`. The `@Processor` is **not** here yet (SI-03.9), so the API stays a pure producer and the worker connects but does not yet consume.
+  - **Metadata-graph gotcha:** `forFeature([Video])` alone crashes the worker at boot with `Entity metadata for Video#channel was not found` — `Video @ManyToOne(Channel)` and `Channel @OneToOne(User)` pull `Channel` and `User` into the metadata graph. Registered `forFeature([Video, Channel, User])` (relation metadata only; the worker uses just the `Video` repo). `User` does not reference the token entities, so the closure stops there.
+  - **New scripts:** `start:worker` (`ts-node --compiler-options '{"module":"CommonJS"}' src/worker.ts`, mirrors the `seed` script) and `start:worker:prod` (`node dist/worker`). The `video-worker` Compose service now runs `command: npm run start:worker` (autostarts with the stack), replacing the `tail -f` placeholder from SI-03.2.
 
 ### SI-03.9 — Video Processing Processor (metadata + thumbnail + status lifecycle)
 - **Status:** pending
