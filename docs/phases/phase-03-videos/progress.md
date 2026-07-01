@@ -1,24 +1,29 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 8/12 completed
+**SIs:** 9/12 completed
 
-> **Resume next session at SI-03.9 (Video Processing Processor).** The worker
-> now boots (03.8): a standalone Nest context consumes-side is wired, connects
-> to DB/Redis/MinIO and stays alive on the `video-processing` queue — but there
-> is still **no `@Processor`**, so enqueued jobs are not yet consumed. Next is
-> the FFmpeg processor (03.9: metadata + thumbnail + status lifecycle, added as
-> a provider in `WorkerModule`), then the read endpoints (03.10 metadata, 03.11
-> stream/Range, 03.12 download). DoD is green through SI-03.8: `tsc` clean,
-> lint 0, 178 unit/integration, 64 e2e. Docker stack (db/redis/minio/api +
-> **video-worker**) must be up before implementing/testing; the worker
-> autostarts via its Compose `command: npm run start:worker`. Run e2e with
-> `npm run test:e2e` (`--runInBand` + `testTimeout: 30000`).
+> **Resume next session at SI-03.10 (Video Metadata Endpoint).** The full
+> upload→process pipeline now works end to end: the API enqueues a job on
+> completion and the worker (03.9) consumes it — downloads the source, extracts
+> metadata + a thumbnail via FFmpeg, and flips the video to `ready` (or
+> `failed` after retries). Remaining are the three read endpoints: 03.10
+> (`GET /videos/:publicId` metadata), 03.11 (`GET /videos/:publicId/stream`
+> Range/206), 03.12 (`GET /videos/:publicId/download`). DoD green through
+> SI-03.9: `tsc` clean, lint 0, 182 unit/integration, 64 e2e.
 >
-> Note: the full unit+integration run flaked once on `auth.service.integration-spec`
-> (`DataSource.initialize` failed in `beforeAll` under load with the worker
-> holding connections) — passed clean on isolated and full re-run. Known
-> single-shared-DB integration flakiness, not a regression.
+> **Worker is now profile-gated** (`profiles: ["worker"]`) — it does NOT
+> autostart with the stack (per the convention that only infra autostarts;
+> app processes are started on demand, like the nestjs-api server). To exercise
+> the live pipeline: `docker compose --profile worker up -d video-worker`. The
+> processor is covered by direct-call integration tests, so the test suite needs
+> no live consumer. Docker infra (db/redis/minio/api) must be up before
+> implementing/testing; run e2e with `npm run test:e2e`.
+>
+> Note: the integration suite has a pre-existing intermittent flake (`mail`,
+> occasionally `auth`/`video.entity` before the 03.9 cleanup fix) tied to the
+> single shared DB + mailpit — each passes clean in isolation and on re-run. Not
+> a regression; a real fix would isolate per-suite DB state (future task).
 >
 > Branch `feature/phase-03-videos`; commits not yet pushed to `origin`.
 
@@ -88,9 +93,15 @@
   - **New scripts:** `start:worker` (`ts-node --compiler-options '{"module":"CommonJS"}' src/worker.ts`, mirrors the `seed` script) and `start:worker:prod` (`node dist/worker`). The `video-worker` Compose service now runs `command: npm run start:worker` (autostarts with the stack), replacing the `tail -f` placeholder from SI-03.2.
 
 ### SI-03.9 — Video Processing Processor (metadata + thumbnail + status lifecycle)
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** integration `video-processing.processor.integration-spec.ts` (4: real FFmpeg + MinIO + DB — success flips to `ready` with duration/metadata/thumbnail; corrupt object throws; terminal `onFailed` → `failed` + `error_reason`; non-terminal `onFailed` leaves `processing`). Full unit+integration 182/182 + e2e 64/64.
+- **Observations:**
+  - `VideoProcessingProcessor` (`@Processor(VIDEO_PROCESSING_QUEUE)` extends `WorkerHost`) `process(job)`: loads the video, streams the source to a temp file via `StorageService.getObjectToFile` (10GB-safe), `ffprobe` for duration/metadata, `.screenshots()` for the thumbnail, `putObject`, then `status = ready`; temp dir removed in `finally`. Missing video row → warn + return (no retry) — proven live against orphaned test jobs.
+  - **Failure lifecycle (TD-08):** thrown errors bubble so BullMQ retries with the producer's backoff; `@OnWorkerEvent('failed')` flips to `failed` + bounded `error_reason` **only** on the terminal attempt (`attemptsMade >= opts.attempts`), leaving the job in the dead-letter set.
+  - Registered as a provider in `WorkerModule`; added `buildThumbnailKey(videoId)` to `storage.service.ts` (extracted from `buildVideoKeys`, reused by the processor).
+  - **FFmpeg in the dev image:** the processor integration test runs in the `nestjs-api` container, which lacked FFmpeg — added `ffmpeg` to `Dockerfile.dev` (mirrors `Dockerfile.worker`) and rebuilt. The test generates a real MP4 via FFmpeg's `lavfi testsrc` (no committed binary fixture).
+  - **Test isolation choice:** the integration test calls `process()`/`onFailed()` **directly** (no job enqueued, no BullMQ worker started in the test module) so it never races the live compose worker on the shared Redis.
+  - **Worker profile-gated (revised from 03.8):** `video-worker` no longer autostarts — moved behind `profiles: ["worker"]`. Rationale corrected after investigation: an early hypothesis blamed worker↔test DB contention for a flake, but the flake reproduced with the worker stopped — it was a **partial-cleanup bug** in `video.entity.integration-spec` (`beforeEach` deleted `videos/channels/users` but not the token tables, so a lingering `verification_tokens` row from another suite broke `DELETE FROM users` once my new test files shifted Jest's suite order). Fixed by switching that suite to the canonical `cleanAllTables`. The profile gating stands on its own merit: only infra autostarts (convention), and the processor is covered by direct-call tests.
 
 ### SI-03.10 — Video Metadata Endpoint
 - **Status:** pending

@@ -4,7 +4,10 @@ import { RefreshToken } from '../../auth/entities/refresh-token.entity';
 import { VerificationToken } from '../../auth/entities/verification-token.entity';
 import { User } from '../../users/entities/user.entity';
 import { Channel } from '../../channels/entities/channel.entity';
-import { createTestDataSource } from '../../test/create-test-data-source';
+import {
+  cleanAllTables,
+  createTestDataSource,
+} from '../../test/create-test-data-source';
 import { Video, VideoStatus } from './video.entity';
 
 const ALL_ENTITIES = [User, Channel, RefreshToken, VerificationToken, Video];
@@ -28,9 +31,9 @@ describe('Video entity (integration)', () => {
   });
 
   beforeEach(async () => {
-    await dataSource.query('DELETE FROM "videos"');
-    await dataSource.query('DELETE FROM "channels"');
-    await dataSource.query('DELETE FROM "users"');
+    // Delete in FK-dependency order (incl. token tables other suites may leave),
+    // otherwise a lingering verification_tokens row blocks DELETE FROM users.
+    await cleanAllTables(dataSource);
   });
 
   async function createChannel(): Promise<Channel> {

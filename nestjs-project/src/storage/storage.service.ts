@@ -38,6 +38,11 @@ export interface ObjectRange {
   contentRange?: string;
 }
 
+/** Thumbnail key for a video, derived from its UUID (never from user input). */
+export function buildThumbnailKey(videoId: string): string {
+  return `videos/${videoId}/thumbnail.jpg`;
+}
+
 /** Storage keys for a video, derived from its UUID (never from user input). */
 export function buildVideoKeys(
   videoId: string,
@@ -45,7 +50,7 @@ export function buildVideoKeys(
 ): { originalKey: string; thumbnailKey: string } {
   return {
     originalKey: `videos/${videoId}/original/${filename}`,
-    thumbnailKey: `videos/${videoId}/thumbnail.jpg`,
+    thumbnailKey: buildThumbnailKey(videoId),
   };
 }
 
