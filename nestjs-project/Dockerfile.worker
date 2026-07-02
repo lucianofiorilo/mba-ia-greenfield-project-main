@@ -1,0 +1,13 @@
+FROM node:25.6.0-slim
+
+# ffmpeg/ffprobe are required by the video worker (fluent-ffmpeg drives the
+# OS-provided binaries). procps/curl mirror the dev image's tooling.
+RUN apt update && apt install -y procps curl ffmpeg
+
+WORKDIR /home/node/app
+
+USER node
+
+# Kept alive like the dev image; the worker process is started via the Compose
+# service command (npm run start:worker).
+CMD [ "tail", "-f", "/dev/null" ]

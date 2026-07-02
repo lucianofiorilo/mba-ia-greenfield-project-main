@@ -10,20 +10,20 @@ More info in the project overview: [docs/project-plan.md](docs/project-plan.md)
 
 This is a monorepo with two main areas:
 
-- `nestjs-project/` — Backend API (NestJS 11, TypeScript, Express). Contains modules for users, channels, videos, comments, etc.
+- `nestjs-project/` — Backend API (NestJS 11, TypeScript, Express). Contains modules for auth, users, channels, mail, storage, videos, and the video worker.
 - `docs/` — Project documentation, architecture diagrams, and planning.
-- `next-frontend/` (Next.js) — not yet initialized
+- `next-frontend/` — Frontend (Next.js 16, App Router). Auth screens and BFF Route Handlers (Phases 01–02); video UI not yet built.
 
 ## Architecture (C4 Container Diagram)
 
 See `docs/diagrams/software-arch.mermaid` for the full diagram. Key containers:
 
 - **Frontend** (Next.js) → calls API via REST, streams from Object Storage
-- **API** (Nest.js) → business rules, auth, reads/writes DB, uploads to storage, publishes jobs to queue, sends emails
-- **Video Worker** (FFmpeg) → consumes jobs from queue, processes videos, updates DB and storage
+- **API** (Nest.js) → business rules, auth, reads/writes DB, presigns uploads to storage, publishes jobs to queue, sends emails
+- **Video Worker** (FFmpeg) → standalone Nest application context (`nestjs-project/src/worker.ts`); consumes jobs from the queue, extracts duration/metadata, generates the thumbnail, updates DB and storage
 - **Database** (PostgreSQL) → users, channels, videos, comments, likes
-- **Object Storage** (S3/MinIO) → video files and thumbnails
-- **Message Queue** (TBD) → video processing job queue
+- **Object Storage** (S3/MinIO) → video files and thumbnails; clients upload directly via presigned multipart URLs
+- **Message Queue** (Redis + BullMQ) → `video-processing` job queue (per `phase-03-videos/TD-01`)
 - **Email Service** (SMTP) → account confirmation and password recovery
 
 ## Docker Networking
