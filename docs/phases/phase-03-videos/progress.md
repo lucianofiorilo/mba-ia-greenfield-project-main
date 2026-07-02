@@ -1,35 +1,23 @@
 # phase-03-videos — Progress
 
-**Status:** in_progress
-**SIs:** 11/12 completed
+**Status:** completed
+**SIs:** 12/12 completed
 
-> **⏸ Paused 2026-07-01 — resume 2026-07-02.** Session stopped after SI-03.11;
-> all work is committed and pushed to `origin/feature/phase-03-videos` (tip
-> `d9bd32e`), working tree clean, DoD green. Pick up tomorrow with SI-03.12
-> below (the last SI of the phase).
+> **Phase complete (2026-07-02).** Full upload→process→deliver pipeline live:
+> multipart presigned upload (03.6–03.7), standalone FFmpeg worker (03.8–03.9),
+> public metadata (03.10), Range/206 streaming (03.11), attachment download
+> (03.12).
 >
-> **Resume next session at SI-03.12 (Download Endpoint).** The full
-> upload→process pipeline works end to end; the public metadata read (03.10) and
-> Range/206 streaming (03.11) are live. The only remaining SI is 03.12
-> (`GET /videos/:publicId/download` — full body + `Content-Disposition:
-> attachment`), the same range-capable delivery path as 03.11 minus the Range
-> and plus the attachment header (per TD-07). DoD green through SI-03.11: `tsc`
-> clean, lint 0, 189 unit/integration, 70 e2e.
->
-> **Worker is now profile-gated** (`profiles: ["worker"]`) — it does NOT
-> autostart with the stack (per the convention that only infra autostarts;
-> app processes are started on demand, like the nestjs-api server). To exercise
-> the live pipeline: `docker compose --profile worker up -d video-worker`. The
-> processor is covered by direct-call integration tests, so the test suite needs
-> no live consumer. Docker infra (db/redis/minio/api) must be up before
-> implementing/testing; run e2e with `npm run test:e2e`.
+> **Worker is profile-gated** (`profiles: ["worker"]`) — it does NOT autostart
+> with the stack (only infra autostarts). To exercise the live pipeline:
+> `docker compose --profile worker up -d video-worker`. The processor is
+> covered by direct-call integration tests, so the test suite needs no live
+> consumer.
 >
 > Note: the integration suite has a pre-existing intermittent flake (`mail`,
-> occasionally `auth`/`video.entity` before the 03.9 cleanup fix) tied to the
-> single shared DB + mailpit — each passes clean in isolation and on re-run. Not
-> a regression; a real fix would isolate per-suite DB state (future task).
->
-> Branch `feature/phase-03-videos`; commits not yet pushed to `origin`.
+> occasionally `auth`) tied to the single shared DB + mailpit — each passes
+> clean in isolation and on re-run. Not a regression; a real fix would isolate
+> per-suite DB state (future task).
 
 ### SI-03.1 — Dependencies, Configuration Namespaces, and Env Validation
 - **Status:** completed
@@ -127,6 +115,10 @@
   - **E2E `ready` setup without the worker:** the streaming contract is independent of FFmpeg processing, so the test completes a real multipart upload (object lands in MinIO) then flips the row to `ready` directly via the repository — no live worker/queue consumer needed. Assertions key off status + `Content-Range`/`Content-Length` headers (robust across supertest's binary body handling) rather than parsing the `video/mp4` body.
 
 ### SI-03.12 — Download Endpoint
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** unit `videos.service.spec.ts` (+4: unknown→`VideoNotFoundException`, non-ready→`VideoNotReadyException`, full object + `Content-Disposition: attachment` headers, filename sanitization/fallback) + e2e `videos.e2e-spec.ts` (+3: 200 attachment + full body anonymous, 409 `VIDEO_NOT_READY`, 404 unknown). Full unit+integration 193/193 + e2e 73/73; `tsc` clean, lint 0.
+- **Observations:**
+  - `VideosService.openDownload(publicId)` reuses the 03.11 delivery path: the shared `loadReadyVideo` precondition (404 → 409, extracted from `openStream`) then `getObjectRange(storage_key)` with **no** Range — full object, status always 200, headers `Content-Type`/`Content-Length`/`Content-Disposition: attachment; filename="…"`. Never buffered in the API.
+  - **Filename sanitization:** `original_filename` is user input headed into a response header — `"`/`\` break the quoted-string and non-Latin-1 chars make Node throw `ERR_INVALID_CHAR` (a 500 on an otherwise valid download). `toAttachmentFilename` replaces both classes with `_` and falls back to `public_id` when null/empty.
+  - Controller: `@Public() @Get(':publicId/download')` with `@Res()`; the stream-piping lifecycle (upstream error → `res.destroy`, client close → `stream.destroy`) was extracted into a private `pipeToResponse` shared by `stream()` and `download()`.
+  - `Accept-Ranges` is deliberately **not** sent on download (contract defines it only for `/stream`).

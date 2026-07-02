@@ -553,32 +553,32 @@ Linearized implementation order: SI-03.1 → SI-03.2 → SI-03.3, SI-03.4 (paral
 
 ## Deliverables
 
-- [ ] SI-03.1 — Dependencies, configuration namespaces, env validation
-- [ ] SI-03.2 — Docker Compose infrastructure (MinIO + Redis) and worker image
-- [ ] SI-03.3 — Object storage service (S3/MinIO adapter)
-- [ ] SI-03.4 — Video entity, status enum, and migration
-- [ ] SI-03.5 — Videos module, domain exceptions, queue registration
-- [ ] SI-03.6 — Upload initiation (draft + multipart presigned URLs)
-- [ ] SI-03.7 — Upload completion (enqueue) and abort
-- [ ] SI-03.8 — Worker bootstrap (standalone entrypoint)
-- [ ] SI-03.9 — Video processing processor (metadata + thumbnail + status)
-- [ ] SI-03.10 — Video metadata endpoint
-- [ ] SI-03.11 — Streaming endpoint (Range/206)
-- [ ] SI-03.12 — Download endpoint
+- [x] SI-03.1 — Dependencies, configuration namespaces, env validation
+- [x] SI-03.2 — Docker Compose infrastructure (MinIO + Redis) and worker image
+- [x] SI-03.3 — Object storage service (S3/MinIO adapter)
+- [x] SI-03.4 — Video entity, status enum, and migration
+- [x] SI-03.5 — Videos module, domain exceptions, queue registration
+- [x] SI-03.6 — Upload initiation (draft + multipart presigned URLs)
+- [x] SI-03.7 — Upload completion (enqueue) and abort
+- [x] SI-03.8 — Worker bootstrap (standalone entrypoint)
+- [x] SI-03.9 — Video processing processor (metadata + thumbnail + status)
+- [x] SI-03.10 — Video metadata endpoint
+- [x] SI-03.11 — Streaming endpoint (Range/206)
+- [x] SI-03.12 — Download endpoint
 
 **Feature deliverables (from the project plan):**
 
-- [ ] Upload of up to 10GB without blocking the API (multipart presigned, direct to storage), with the video pre-registered as `draft` at initiation
-- [ ] Automatic processing after upload: duration/metadata extraction and thumbnail generation
-- [ ] Unique public URL per video (nanoid `public_id`), no conflicts
-- [ ] Streaming (Range/206, no full download required) and download available
-- [ ] Video status lifecycle (`draft → processing → ready/failed`) reflected in the database
-- [ ] Object storage, queue, and worker run via `docker compose` alongside the backend
+- [x] Upload of up to 10GB without blocking the API (multipart presigned, direct to storage), with the video pre-registered as `draft` at initiation
+- [x] Automatic processing after upload: duration/metadata extraction and thumbnail generation
+- [x] Unique public URL per video (nanoid `public_id`), no conflicts
+- [x] Streaming (Range/206, no full download required) and download available
+- [x] Video status lifecycle (`draft → processing → ready/failed`) reflected in the database
+- [x] Object storage, queue, and worker run via `docker compose` alongside the backend
 
 **Full test suites:**
 
-- [ ] Backend tests pass (`docker compose exec nestjs-api npm test -- --runInBand`)
-- [ ] E2E tests pass (`docker compose exec nestjs-api npm run test:e2e`)
+- [x] Backend tests pass (`docker compose exec nestjs-api npm test -- --runInBand`)
+- [x] E2E tests pass (`docker compose exec nestjs-api npm run test:e2e`)
 - [ ] Type/compilation check passes (`docker compose exec nestjs-api npx tsc --noEmit`)
 - [ ] Lint passes (`docker compose exec nestjs-api npm run lint`)
 - [ ] Project builds successfully (`docker compose exec nestjs-api npm run build`)
