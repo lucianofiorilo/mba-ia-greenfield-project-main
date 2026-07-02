@@ -8,11 +8,13 @@
 > public metadata (03.10), Range/206 streaming (03.11), attachment download
 > (03.12).
 >
-> **Worker is profile-gated** (`profiles: ["worker"]`) — it does NOT autostart
-> with the stack (only infra autostarts). To exercise the live pipeline:
-> `docker compose --profile worker up -d video-worker`. The processor is
-> covered by direct-call integration tests, so the test suite needs no live
-> consumer.
+> **Worker autostarts with the stack** (`docker compose up -d` brings up
+> db/redis/minio/mailpit/api/video-worker). It was briefly profile-gated after
+> SI-03.9 (convention: only infra autostarts), but the challenge's acceptance
+> criteria require storage, queue **and worker** to come up via `docker
+> compose` with the backend — the gate was removed at phase closure. The
+> processor is additionally covered by direct-call integration tests, so the
+> test suite needs no live consumer.
 >
 > Note: the integration suite has a pre-existing intermittent flake (`mail`,
 > occasionally `auth`) tied to the single shared DB + mailpit — each passes

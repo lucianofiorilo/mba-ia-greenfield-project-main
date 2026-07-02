@@ -22,13 +22,6 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     command: npm run start:worker
-    # Gated behind a profile so it does NOT autostart with the stack: per the
-    # project convention only infrastructure autostarts — app processes are
-    # started deliberately (the nestjs-api container likewise tails and the
-    # server is run on demand). The processor is covered by direct-call
-    # integration tests, so tests need no live consumer. Start it to actually
-    # process uploads: `docker compose --profile worker up -d video-worker`.
-    profiles: ["worker"]
     volumes:
       - .:/home/node/app
     depends_on:
