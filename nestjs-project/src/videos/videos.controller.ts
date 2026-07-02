@@ -1,4 +1,13 @@
-import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  Param,
+  Post,
+  Res,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -6,6 +15,7 @@ import {
   ApiTags,
   getSchemaPath,
 } from '@nestjs/swagger';
+import type { Response } from 'express';
 import { ApiErrorEnvelope } from '../common/openapi/api-error-envelope.dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
@@ -192,5 +202,61 @@ export class VideosController {
     @Param('publicId') publicId: string,
   ): Promise<VideoViewDto> {
     return this.videosService.getByPublicId(publicId);
+  }
+
+  @Public()
+  @Get(':publicId/stream')
+  @ApiOperation({
+    summary: 'Stream a video',
+    description:
+      'Serves the video bytes with HTTP Range support. A `Range` request ' +
+      'yields `206 Partial Content` with `Content-Range`; a plain request ' +
+      'yields `200` with the full body. Bytes are piped from storage, never ' +
+      'buffered in the API. Accessible anonymously; only `ready` videos.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Full video body (no Range header)',
+    content: { '*/*': { schema: { type: 'string', format: 'binary' } } },
+  })
+  @ApiResponse({
+    status: 206,
+    description: 'Partial video body for the requested byte range',
+    content: { '*/*': { schema: { type: 'string', format: 'binary' } } },
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Video not found',
+    schema: { $ref: getSchemaPath(ApiErrorEnvelope) },
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Video is not ready for playback',
+    schema: { $ref: getSchemaPath(ApiErrorEnvelope) },
+  })
+  async stream(
+    @Param('publicId') publicId: string,
+    @Headers('range') range: string | undefined,
+    @Res() res: Response,
+  ): Promise<void> {
+    const { stream, status, headers } = await this.videosService.openStream(
+      publicId,
+      range,
+    );
+
+    res.status(status);
+    res.set(headers);
+
+    // Never buffer: pipe the storage stream straight to the client. On an
+    // upstream error, destroy the response so the client sees a broken
+    // connection rather than a hang; if the client disconnects first, tear
+    // down the upstream stream to avoid leaking the storage connection.
+    stream.on('error', (err) => res.destroy(err));
+    res.on('close', () => {
+      if (!stream.destroyed) {
+        stream.destroy();
+      }
+    });
+    stream.pipe(res);
   }
 }

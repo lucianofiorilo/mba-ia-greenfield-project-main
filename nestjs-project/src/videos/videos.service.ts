@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { Readable } from 'node:stream';
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -21,6 +22,7 @@ import {
   UnsupportedMediaTypeException,
   VideoAccessDeniedException,
   VideoNotFoundException,
+  VideoNotReadyException,
 } from './exceptions/video.exceptions';
 import {
   MAX_PUBLIC_ID_RETRIES,
@@ -43,6 +45,13 @@ export interface InitiateUploadResult {
   key: string;
   partSize: number;
   parts: PresignedPart[];
+}
+
+export interface VideoStreamResult {
+  stream: Readable;
+  /** 206 when the client sent a `Range` header, 200 for the full body. */
+  status: number;
+  headers: Record<string, string>;
 }
 
 function isUniqueViolation(err: unknown): boolean {
@@ -236,6 +245,46 @@ export class VideosService {
       channelId: video.channel_id,
       createdAt: video.created_at.toISOString(),
     };
+  }
+
+  /**
+   * Open a (optionally ranged) read stream of a `ready` video's bytes. The
+   * client's raw `Range` header is passed straight through to storage, which
+   * returns only the requested slice (206) or the full object (200) — the API
+   * never buffers the file. Anonymous; the video must be `ready`.
+   */
+  async openStream(
+    publicId: string,
+    range?: string,
+  ): Promise<VideoStreamResult> {
+    const video = await this.videoRepository.findOne({
+      where: { public_id: publicId },
+    });
+    if (!video) {
+      throw new VideoNotFoundException();
+    }
+    if (video.status !== VideoStatus.READY) {
+      throw new VideoNotReadyException();
+    }
+
+    const object = await this.storageService.getObjectRange(
+      video.storage_key,
+      range,
+    );
+
+    const headers: Record<string, string> = {
+      'Accept-Ranges': 'bytes',
+      'Content-Type': object.contentType,
+      'Content-Length': String(object.contentLength),
+    };
+    // A Range request yields 206 + Content-Range; a plain request yields 200.
+    let status = 200;
+    if (range && object.contentRange) {
+      status = 206;
+      headers['Content-Range'] = object.contentRange;
+    }
+
+    return { stream: object.body, status, headers };
   }
 
   /**

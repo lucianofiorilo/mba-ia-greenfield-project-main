@@ -6,6 +6,7 @@ import { DataSource } from 'typeorm';
 import { ThrottlerStorage, ThrottlerStorageService } from '@nestjs/throttler';
 import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
+import { Video, VideoStatus } from '../src/videos/entities/video.entity';
 import { DomainExceptionFilter } from '../src/common/filters/domain-exception.filter';
 import { ValidationExceptionFilter } from '../src/common/filters/validation-exception.filter';
 import { cleanAllTables } from '../src/test/create-test-data-source';
@@ -309,6 +310,77 @@ describe('Videos (e2e)', () => {
     it('returns 404 VIDEO_NOT_FOUND for an unknown publicId', async () => {
       const res = await request(app.getHttpServer())
         .get('/videos/doesnotexist')
+        .expect(404);
+
+      expect(res.body.error).toBe('VIDEO_NOT_FOUND');
+    });
+  });
+
+  // Complete a real upload (object lands in MinIO) then flip the row to `ready`
+  // directly — the worker is not part of the streaming contract under test.
+  async function readyVideo(
+    accessToken: string,
+    body = 'hello world',
+  ): Promise<{ publicId: string; size: number }> {
+    const { publicId, parts } = await initiateAndUpload(accessToken, body);
+    await request(app.getHttpServer())
+      .post(`/videos/${publicId}/complete`)
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ parts })
+      .expect(200);
+    await dataSource
+      .getRepository(Video)
+      .update({ public_id: publicId }, { status: VideoStatus.READY });
+    return { publicId, size: body.length };
+  }
+
+  describe('GET /videos/:publicId/stream', () => {
+    it('returns 206 with Content-Range and the requested slice for a Range request (anonymous)', async () => {
+      const token = await registerConfirmAndLogin('stream-206@example.com');
+      const { publicId, size } = await readyVideo(token, 'hello world');
+
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${publicId}/stream`)
+        .set('Range', 'bytes=0-4')
+        .expect(206);
+
+      expect(res.headers['content-range']).toBe(`bytes 0-4/${size}`);
+      expect(res.headers['accept-ranges']).toBe('bytes');
+      expect(res.headers['content-length']).toBe('5');
+    });
+
+    it('returns 200 with Accept-Ranges and the full body when no Range is sent', async () => {
+      const token = await registerConfirmAndLogin('stream-200@example.com');
+      const { publicId, size } = await readyVideo(token, 'hello world');
+
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${publicId}/stream`)
+        .expect(200);
+
+      expect(res.headers['accept-ranges']).toBe('bytes');
+      expect(res.headers['content-length']).toBe(String(size));
+      expect(res.headers['content-range']).toBeUndefined();
+    });
+
+    it('returns 409 VIDEO_NOT_READY for a video that is not ready', async () => {
+      const token = await registerConfirmAndLogin('stream-409@example.com');
+      // A freshly initiated upload stays in `draft` — not streamable.
+      const init = await request(app.getHttpServer())
+        .post('/videos')
+        .set('Authorization', `Bearer ${token}`)
+        .send(VALID_BODY)
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${init.body.publicId}/stream`)
+        .expect(409);
+
+      expect(res.body.error).toBe('VIDEO_NOT_READY');
+    });
+
+    it('returns 404 VIDEO_NOT_FOUND for an unknown publicId', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/videos/doesnotexist/stream')
         .expect(404);
 
       expect(res.body.error).toBe('VIDEO_NOT_FOUND');

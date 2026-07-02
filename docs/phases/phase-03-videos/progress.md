@@ -1,14 +1,15 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 10/12 completed
+**SIs:** 11/12 completed
 
-> **Resume next session at SI-03.11 (Streaming Endpoint — Range/206).** The full
-> upload→process pipeline works end to end and the public metadata read
-> (`GET /videos/:publicId`, 03.10) is live. Remaining are the two byte-serving
-> read endpoints: 03.11 (`GET /videos/:publicId/stream` Range/206) and 03.12
-> (`GET /videos/:publicId/download`). DoD green through SI-03.10: `tsc` clean,
-> lint 0, 185 unit/integration, 66 e2e.
+> **Resume next session at SI-03.12 (Download Endpoint).** The full
+> upload→process pipeline works end to end; the public metadata read (03.10) and
+> Range/206 streaming (03.11) are live. The only remaining SI is 03.12
+> (`GET /videos/:publicId/download` — full body + `Content-Disposition:
+> attachment`), the same range-capable delivery path as 03.11 minus the Range
+> and plus the attachment header (per TD-07). DoD green through SI-03.11: `tsc`
+> clean, lint 0, 189 unit/integration, 70 e2e.
 >
 > **Worker is now profile-gated** (`profiles: ["worker"]`) — it does NOT
 > autostart with the stack (per the convention that only infra autostarts;
@@ -111,9 +112,14 @@
   - `VideoViewDto` is a **response** DTO (no `class-validator` decorators), so per the DTO rule every field carries an explicit `@ApiProperty` (the Swagger CLI plugin cannot introspect a non-validated shape). Controller route is `@Public() @Get(':publicId')`, documented 200 (`type: VideoViewDto`) + 404 (shared `ApiErrorEnvelope`).
 
 ### SI-03.11 — Streaming Endpoint (Range / 206 Partial Content)
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** unit `videos.service.spec.ts` (+4: unknown→`VideoNotFoundException`, non-ready→`VideoNotReadyException`, 206+`Content-Range` for a Range request, 200 without `Content-Range` for a plain request) + e2e `videos.e2e-spec.ts` (+4: 206 `bytes=0-4` with `Content-Range: bytes 0-4/11` + `Content-Length: 5` anonymous, 200 full body + `Accept-Ranges`, 409 `VIDEO_NOT_READY`, 404 unknown). Full unit+integration 189/189 + e2e 70/70; `tsc` clean, lint 0.
+- **Observations:**
+  - `VideosService.openStream(publicId, range?)` loads by `public_id` (404 anonymous), requires `status === 'ready'` (409 `VIDEO_NOT_READY`), then calls `StorageService.getObjectRange(storage_key, range)` and returns `{ stream, status, headers }`. The client's **raw `Range` header is passed straight through** to S3/MinIO's `GetObject` — the store does the byte-range parsing and returns the correct slice + `ContentRange`; the API never parses ranges itself and never buffers the object.
+  - **Status/header rule:** 206 + `Content-Range` when the request carried a `Range` header (and storage returned a `ContentRange`); otherwise 200. Both responses always set `Accept-Ranges: bytes`, `Content-Type`, `Content-Length` (per the API contract + TD-07).
+  - **Controller uses `@Res()` (manual response mode):** `@Public() @Get(':publicId/stream')` injects the Express `Response`, sets status + headers, then `stream.pipe(res)`. Domain exceptions from `openStream` are thrown **before** any byte is written, so the global `DomainExceptionFilter` still maps them (404/409) — `@Res()` only bypasses Nest's success-path serialization, not the exception layer.
+  - **Stream lifecycle (never-hang / no-leak):** `stream.on('error', (err) => res.destroy(err))` so an upstream storage fault breaks the client connection instead of hanging; `res.on('close', () => stream.destroy())` tears down the S3 read stream if the client disconnects mid-playback, avoiding a leaked storage connection.
+  - **E2E `ready` setup without the worker:** the streaming contract is independent of FFmpeg processing, so the test completes a real multipart upload (object lands in MinIO) then flips the row to `ready` directly via the repository — no live worker/queue consumer needed. Assertions key off status + `Content-Range`/`Content-Length` headers (robust across supertest's binary body handling) rather than parsing the `video/mp4` body.
 
 ### SI-03.12 — Download Endpoint
 - **Status:** pending

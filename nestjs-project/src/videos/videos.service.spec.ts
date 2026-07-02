@@ -14,6 +14,7 @@ import {
   UnsupportedMediaTypeException,
   VideoAccessDeniedException,
   VideoNotFoundException,
+  VideoNotReadyException,
 } from './exceptions/video.exceptions';
 import {
   VIDEO_JOB_OPTIONS,
@@ -55,6 +56,7 @@ describe('VideosService (unit)', () => {
     presignUploadParts: jest.Mock;
     completeMultipartUpload: jest.Mock;
     abortMultipartUpload: jest.Mock;
+    getObjectRange: jest.Mock;
   };
   let channelsService: { findByUserId: jest.Mock };
   let queue: { add: jest.Mock };
@@ -71,6 +73,7 @@ describe('VideosService (unit)', () => {
       presignUploadParts: jest.fn().mockResolvedValue([]),
       completeMultipartUpload: jest.fn().mockResolvedValue(undefined),
       abortMultipartUpload: jest.fn().mockResolvedValue(undefined),
+      getObjectRange: jest.fn(),
     };
     channelsService = {
       findByUserId: jest.fn().mockResolvedValue({ id: 'channel-1' }),
@@ -311,6 +314,85 @@ describe('VideosService (unit)', () => {
       expect(view.thumbnailUrl).toBeNull();
       expect(view.durationSeconds).toBeNull();
       expect(view.streamUrl).toBe('http://localhost:3000/videos/pub123/stream');
+    });
+  });
+
+  describe('openStream', () => {
+    const readyVideo = (): Partial<Video> => ({
+      public_id: 'pub123',
+      status: VideoStatus.READY,
+      storage_key: 'videos/video-uuid/original/clip.mp4',
+    });
+
+    it('throws VideoNotFoundException for an unknown public_id', async () => {
+      repository.findOne.mockResolvedValue(null);
+
+      await expect(service.openStream('nope')).rejects.toThrow(
+        VideoNotFoundException,
+      );
+      expect(storageService.getObjectRange).not.toHaveBeenCalled();
+    });
+
+    it('throws VideoNotReadyException when the video is not ready', async () => {
+      repository.findOne.mockResolvedValue({
+        ...readyVideo(),
+        status: VideoStatus.PROCESSING,
+      });
+
+      await expect(service.openStream('pub123')).rejects.toThrow(
+        VideoNotReadyException,
+      );
+      expect(storageService.getObjectRange).not.toHaveBeenCalled();
+    });
+
+    it('returns 206 with Content-Range for a Range request', async () => {
+      repository.findOne.mockResolvedValue(readyVideo());
+      const body = Symbol('stream');
+      storageService.getObjectRange.mockResolvedValue({
+        body,
+        contentLength: 5,
+        contentType: 'video/mp4',
+        contentRange: 'bytes 0-4/11',
+      });
+
+      const result = await service.openStream('pub123', 'bytes=0-4');
+
+      expect(storageService.getObjectRange).toHaveBeenCalledWith(
+        'videos/video-uuid/original/clip.mp4',
+        'bytes=0-4',
+      );
+      expect(result.status).toBe(206);
+      expect(result.stream).toBe(body);
+      expect(result.headers).toEqual({
+        'Accept-Ranges': 'bytes',
+        'Content-Type': 'video/mp4',
+        'Content-Length': '5',
+        'Content-Range': 'bytes 0-4/11',
+      });
+    });
+
+    it('returns 200 without Content-Range when no Range is sent', async () => {
+      repository.findOne.mockResolvedValue(readyVideo());
+      storageService.getObjectRange.mockResolvedValue({
+        body: Symbol('stream'),
+        contentLength: 11,
+        contentType: 'video/mp4',
+        contentRange: undefined,
+      });
+
+      const result = await service.openStream('pub123');
+
+      expect(storageService.getObjectRange).toHaveBeenCalledWith(
+        'videos/video-uuid/original/clip.mp4',
+        undefined,
+      );
+      expect(result.status).toBe(200);
+      expect(result.headers).toEqual({
+        'Accept-Ranges': 'bytes',
+        'Content-Type': 'video/mp4',
+        'Content-Length': '11',
+      });
+      expect(result.headers['Content-Range']).toBeUndefined();
     });
   });
 
