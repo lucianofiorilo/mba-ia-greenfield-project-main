@@ -1,16 +1,14 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 9/12 completed
+**SIs:** 10/12 completed
 
-> **Resume next session at SI-03.10 (Video Metadata Endpoint).** The full
-> upload→process pipeline now works end to end: the API enqueues a job on
-> completion and the worker (03.9) consumes it — downloads the source, extracts
-> metadata + a thumbnail via FFmpeg, and flips the video to `ready` (or
-> `failed` after retries). Remaining are the three read endpoints: 03.10
-> (`GET /videos/:publicId` metadata), 03.11 (`GET /videos/:publicId/stream`
-> Range/206), 03.12 (`GET /videos/:publicId/download`). DoD green through
-> SI-03.9: `tsc` clean, lint 0, 182 unit/integration, 64 e2e.
+> **Resume next session at SI-03.11 (Streaming Endpoint — Range/206).** The full
+> upload→process pipeline works end to end and the public metadata read
+> (`GET /videos/:publicId`, 03.10) is live. Remaining are the two byte-serving
+> read endpoints: 03.11 (`GET /videos/:publicId/stream` Range/206) and 03.12
+> (`GET /videos/:publicId/download`). DoD green through SI-03.10: `tsc` clean,
+> lint 0, 185 unit/integration, 66 e2e.
 >
 > **Worker is now profile-gated** (`profiles: ["worker"]`) — it does NOT
 > autostart with the stack (per the convention that only infra autostarts;
@@ -104,9 +102,13 @@
   - **Worker profile-gated (revised from 03.8):** `video-worker` no longer autostarts — moved behind `profiles: ["worker"]`. Rationale corrected after investigation: an early hypothesis blamed worker↔test DB contention for a flake, but the flake reproduced with the worker stopped — it was a **partial-cleanup bug** in `video.entity.integration-spec` (`beforeEach` deleted `videos/channels/users` but not the token tables, so a lingering `verification_tokens` row from another suite broke `DELETE FROM users` once my new test files shifted Jest's suite order). Fixed by switching that suite to the canonical `cleanAllTables`. The profile gating stands on its own merit: only infra autostarts (convention), and the processor is covered by direct-call tests.
 
 ### SI-03.10 — Video Metadata Endpoint
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** unit `videos.service.spec.ts` (+3: unknown→`VideoNotFoundException`, entity→view mapping with `publicId`-derived URLs, null `thumbnailUrl` before processing) + e2e `videos.e2e-spec.ts` (+2: 200 anonymous metadata, 404 unknown). Full unit+integration 185/185 + e2e 66/66; `tsc` clean, lint 0.
+- **Observations:**
+  - `VideosService.getByPublicId(publicId)` loads by `public_id` (no ownership check — anonymous watch), throws `VideoNotFoundException` on miss, and maps to `VideoViewDto`. Internal fields (`storage_key`, `upload_id`, `thumbnail_key`) are never exposed — only `publicId`-derived API URLs.
+  - **URL derivation:** `streamUrl` = `${app.url}/videos/${publicId}/stream` (always present; the route lands in 03.11). `thumbnailUrl` = `${app.url}/videos/${publicId}/thumbnail` **only when `thumbnail_key` is set**, else `null` — so a client polling this endpoint observes `thumbnailUrl` flip from `null` to a URL as processing completes, alongside `status` and `durationSeconds`. **Note:** no `/thumbnail` serving route exists yet — the phase defines only stream + download endpoints. The derived thumbnail URL is forward-looking (the field is part of the documented contract); if a thumbnail-serving route is never added, revisit whether to presign the thumbnail object instead. Flagged as a follow-up, not blocking the AC (which only asserts the field shape).
+  - `createdAt` is emitted as an ISO-8601 string (`created_at.toISOString()`) to match the documented `string` contract rather than leaning on implicit `Date`→JSON serialization.
+  - `VideoViewDto` is a **response** DTO (no `class-validator` decorators), so per the DTO rule every field carries an explicit `@ApiProperty` (the Swagger CLI plugin cannot introspect a non-validated shape). Controller route is `@Public() @Get(':publicId')`, documented 200 (`type: VideoViewDto`) + 404 (shared `ApiErrorEnvelope`).
 
 ### SI-03.11 — Streaming Endpoint (Range / 206 Partial Content)
 - **Status:** pending

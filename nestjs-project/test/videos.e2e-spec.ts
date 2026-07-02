@@ -277,4 +277,41 @@ describe('Videos (e2e)', () => {
       expect(res.body.error).toBe('VIDEO_ACCESS_DENIED');
     });
   });
+
+  describe('GET /videos/:publicId', () => {
+    it('returns 200 with the public metadata for an existing video (anonymous)', async () => {
+      const token = await registerConfirmAndLogin('meta-ok@example.com');
+      const init = await request(app.getHttpServer())
+        .post('/videos')
+        .set('Authorization', `Bearer ${token}`)
+        .send(VALID_BODY)
+        .expect(201);
+      const { publicId } = init.body;
+
+      // No Authorization header — the endpoint is public.
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${publicId}`)
+        .expect(200);
+
+      expect(res.body).toEqual({
+        publicId,
+        title: VALID_BODY.title,
+        status: 'draft',
+        durationSeconds: null,
+        metadata: null,
+        thumbnailUrl: null,
+        streamUrl: expect.stringContaining(`/videos/${publicId}/stream`),
+        channelId: expect.any(String),
+        createdAt: expect.any(String),
+      });
+    });
+
+    it('returns 404 VIDEO_NOT_FOUND for an unknown publicId', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/videos/doesnotexist')
+        .expect(404);
+
+      expect(res.body.error).toBe('VIDEO_NOT_FOUND');
+    });
+  });
 });

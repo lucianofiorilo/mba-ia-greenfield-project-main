@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -8,10 +8,12 @@ import {
 } from '@nestjs/swagger';
 import { ApiErrorEnvelope } from '../common/openapi/api-error-envelope.dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 import type { JwtPayload } from '../auth/auth.types';
 import { VideosService, type InitiateUploadResult } from './videos.service';
 import { InitiateUploadDto } from './dto/initiate-upload.dto';
 import { CompleteUploadDto } from './dto/complete-upload.dto';
+import { VideoViewDto } from './dto/video-view.dto';
 import type { VideoStatus } from './entities/video.entity';
 
 @ApiTags('videos')
@@ -165,5 +167,30 @@ export class VideosController {
     @Param('publicId') publicId: string,
   ): Promise<void> {
     return this.videosService.abortUpload(user.sub, publicId);
+  }
+
+  @Public()
+  @Get(':publicId')
+  @ApiOperation({
+    summary: 'Get video metadata',
+    description:
+      'Returns the public-facing metadata and processing status of a video. ' +
+      'Accessible anonymously; a client can poll this to observe the status ' +
+      'transition from `processing` to `ready` after completing an upload.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Video metadata and status',
+    type: VideoViewDto,
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Video not found',
+    schema: { $ref: getSchemaPath(ApiErrorEnvelope) },
+  })
+  async getByPublicId(
+    @Param('publicId') publicId: string,
+  ): Promise<VideoViewDto> {
+    return this.videosService.getByPublicId(publicId);
   }
 }

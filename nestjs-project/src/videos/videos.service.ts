@@ -33,6 +33,7 @@ import {
 } from './videos.constants';
 import type { InitiateUploadDto } from './dto/initiate-upload.dto';
 import type { CompleteUploadDto } from './dto/complete-upload.dto';
+import type { VideoViewDto } from './dto/video-view.dto';
 import uploadConfig from '../config/upload.config';
 import appConfig from '../config/app.config';
 
@@ -208,6 +209,33 @@ export class VideosService {
     );
 
     return { publicId: video.public_id, status: video.status };
+  }
+
+  /**
+   * Public read of a video by `public_id` — status + playback metadata. No
+   * ownership check (anonymous watch); internal storage keys are never exposed,
+   * only `publicId`-derived API URLs for streaming and the thumbnail.
+   */
+  async getByPublicId(publicId: string): Promise<VideoViewDto> {
+    const video = await this.videoRepository.findOne({
+      where: { public_id: publicId },
+    });
+    if (!video) {
+      throw new VideoNotFoundException();
+    }
+
+    const base = `${this.app.url}/videos/${video.public_id}`;
+    return {
+      publicId: video.public_id,
+      title: video.title,
+      status: video.status,
+      durationSeconds: video.duration_seconds,
+      metadata: video.metadata,
+      thumbnailUrl: video.thumbnail_key ? `${base}/thumbnail` : null,
+      streamUrl: `${base}/stream`,
+      channelId: video.channel_id,
+      createdAt: video.created_at.toISOString(),
+    };
   }
 
   /**

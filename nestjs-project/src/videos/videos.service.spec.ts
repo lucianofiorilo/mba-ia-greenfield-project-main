@@ -259,6 +259,61 @@ describe('VideosService (unit)', () => {
     });
   });
 
+  describe('getByPublicId', () => {
+    const ready = (): Partial<Video> => ({
+      public_id: 'pub123',
+      title: 'My clip',
+      status: VideoStatus.READY,
+      duration_seconds: 42.5,
+      metadata: { width: 1920, height: 1080, codec: 'h264' },
+      thumbnail_key: 'videos/video-uuid/thumbnail.jpg',
+      channel_id: 'channel-1',
+      created_at: new Date('2026-07-01T12:00:00.000Z'),
+    });
+
+    it('throws VideoNotFoundException for an unknown public_id', async () => {
+      repository.findOne.mockResolvedValue(null);
+
+      await expect(service.getByPublicId('nope')).rejects.toThrow(
+        VideoNotFoundException,
+      );
+    });
+
+    it('maps the entity to a public view with publicId-derived URLs', async () => {
+      repository.findOne.mockResolvedValue(ready());
+
+      const view = await service.getByPublicId('pub123');
+
+      expect(view).toEqual({
+        publicId: 'pub123',
+        title: 'My clip',
+        status: VideoStatus.READY,
+        durationSeconds: 42.5,
+        metadata: { width: 1920, height: 1080, codec: 'h264' },
+        thumbnailUrl: 'http://localhost:3000/videos/pub123/thumbnail',
+        streamUrl: 'http://localhost:3000/videos/pub123/stream',
+        channelId: 'channel-1',
+        createdAt: '2026-07-01T12:00:00.000Z',
+      });
+    });
+
+    it('returns a null thumbnailUrl while the video has no thumbnail yet', async () => {
+      repository.findOne.mockResolvedValue({
+        ...ready(),
+        status: VideoStatus.PROCESSING,
+        duration_seconds: null,
+        metadata: null,
+        thumbnail_key: null,
+      });
+
+      const view = await service.getByPublicId('pub123');
+
+      expect(view.thumbnailUrl).toBeNull();
+      expect(view.durationSeconds).toBeNull();
+      expect(view.streamUrl).toBe('http://localhost:3000/videos/pub123/stream');
+    });
+  });
+
   describe('abortUpload', () => {
     const draft = (): Partial<Video> => ({
       id: 'video-uuid',
