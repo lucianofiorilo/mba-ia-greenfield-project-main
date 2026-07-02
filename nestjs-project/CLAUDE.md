@@ -13,8 +13,10 @@ docker compose ps   # all services must show status "running"
 Then verify each infrastructure service is actually ready to accept connections — not just running:
 
 - **PostgreSQL:** `docker compose exec db pg_isready -U streamtube` — expect `accepting connections`
+- **Redis:** `docker compose exec redis redis-cli ping` — expect `PONG`
+- **MinIO:** healthcheck built into the Compose service — `docker compose ps minio` must show `(healthy)`
 
-Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment".
+Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment". The **video worker is the exception**: it autostarts with `docker compose up -d` (the challenge requires storage, queue, and worker to come up with the stack).
 
 ## Development Environment
 
@@ -33,7 +35,11 @@ docker compose exec nestjs-api npm run start:dev
 
 Services:
 - `nestjs-api` — NestJS API, port `3000`
+- `video-worker` — standalone video processing worker (FFmpeg + BullMQ consumer); autostarts, no HTTP port
 - `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `redis` — Redis 7, port `6379` (BullMQ job queue)
+- `minio` — MinIO (S3-compatible object storage), API port `9000`, console `9001`, credentials `streamtube`/`streamtube`
+- `mailpit` — SMTP capture, UI at port `8025`
 
 All verification and teardown commands run on the **host machine**:
 
@@ -148,6 +154,45 @@ NestJS with standard module structure. Source lives in `src/`, compiled output i
 
 - Each domain feature gets its own module (e.g., `UsersModule`, `VideosModule`) registered in `AppModule`
 - Controllers handle HTTP routing; Services hold business logic; both are scoped to their module
+
+## Videos & Processing Pipeline (Phase 03)
+
+Full documentation lives in `docs/phases/phase-03-videos/` (plan + progress) and `docs/decisions/technical-decisions-phase-03-videos.md` (TD-01…TD-08). Summary of what is in the code:
+
+### Modules
+
+- `src/videos/` — upload lifecycle, public metadata, and delivery (`VideosController`, `VideosService`, `Video` entity, domain exceptions, `videos.constants.ts`)
+- `src/storage/` — `StorageService`, the S3/MinIO adapter (AWS SDK v3: multipart uploads, presigned part URLs, ranged `GetObject`, thumbnail put). Ensures the bucket exists on boot
+- `src/worker/` — `WorkerModule` + `VideoProcessingProcessor` (BullMQ `@Processor`); entrypoint `src/worker.ts` boots a Nest **application context** (no HTTP). Run via `npm run start:worker` (the `video-worker` Compose service does this automatically)
+- Migration `src/database/migrations/1782696930006-CreateVideos.ts` creates the `videos` table (FK → `channels`, status enum, storage keys, metadata)
+
+### Endpoints (`/videos`)
+
+| Method & Route | Auth | Purpose |
+|---|---|---|
+| `POST /videos` | JWT | Initiate upload: pre-registers a `draft` on the caller's channel, opens a multipart upload, returns presigned PUT URLs per part |
+| `POST /videos/:publicId/complete` | JWT, owner | Finalize multipart upload, flip to `processing`, enqueue the processing job |
+| `POST /videos/:publicId/abort` | JWT, owner | Abort the multipart upload and delete the draft |
+| `GET /videos/:publicId` | public | Metadata + status (clients poll this to observe `processing` → `ready`) |
+| `GET /videos/:publicId/stream` | public | Range/206 streaming (raw `Range` header passed through to storage); only `ready` videos |
+| `GET /videos/:publicId/download` | public | Full body with `Content-Disposition: attachment`; only `ready` videos |
+
+### Upload & processing flow (10GB-safe)
+
+1. The file **never passes through the API**: the client uploads parts directly to MinIO/S3 using the presigned URLs from `POST /videos`.
+2. `complete` enqueues `{ videoId }` on the BullMQ queue **`video-processing`** (Redis), with 3 attempts and exponential backoff.
+3. The worker streams the object to a temp file, runs `ffprobe` (duration/metadata) and FFmpeg screenshot (thumbnail), uploads the thumbnail, and sets `status = ready`.
+4. On the terminal failed attempt the worker sets `status = failed` + `error_reason`; the job stays in BullMQ's failed set (dead-letter).
+
+Status lifecycle: `draft → processing → ready | failed`. Public URLs use `public_id` (nanoid 11); internal UUIDs and storage keys are never exposed.
+
+### Storage keys
+
+`videos/{videoId}/original/{filename}` and `videos/{videoId}/thumbnail.jpg` — derived from the app-generated UUID, never from user input (`buildVideoKeys`/`buildThumbnailKey` in `src/storage/storage.service.ts`).
+
+### Environment
+
+`S3_*` (endpoint/credentials/bucket), `REDIS_*`, and `UPLOAD_*` (max size, part size, presign TTL) are required env vars — validated by the Joi schema in `src/config/env.validation.ts`; see `.env.example`. Inside containers the hosts are the Compose service names (`minio`, `redis`).
 
 ## Code Conventions
 
