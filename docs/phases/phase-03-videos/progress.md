@@ -3,6 +3,11 @@
 **Status:** in_progress
 **SIs:** 11/12 completed
 
+> **⏸ Paused 2026-07-01 — resume 2026-07-02.** Session stopped after SI-03.11;
+> all work is committed and pushed to `origin/feature/phase-03-videos` (tip
+> `d9bd32e`), working tree clean, DoD green. Pick up tomorrow with SI-03.12
+> below (the last SI of the phase).
+>
 > **Resume next session at SI-03.12 (Download Endpoint).** The full
 > upload→process pipeline works end to end; the public metadata read (03.10) and
 > Range/206 streaming (03.11) are live. The only remaining SI is 03.12
