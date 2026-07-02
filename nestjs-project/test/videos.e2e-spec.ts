@@ -386,4 +386,47 @@ describe('Videos (e2e)', () => {
       expect(res.body.error).toBe('VIDEO_NOT_FOUND');
     });
   });
+
+  describe('GET /videos/:publicId/download', () => {
+    it('returns 200 with a Content-Disposition attachment and the full body (anonymous)', async () => {
+      const token = await registerConfirmAndLogin('download-ok@example.com');
+      const { publicId, size } = await readyVideo(token, 'hello world');
+
+      // No Authorization header — the endpoint is public.
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${publicId}/download`)
+        .expect(200);
+
+      expect(res.headers['content-disposition']).toBe(
+        `attachment; filename="${VALID_BODY.filename}"`,
+      );
+      expect(res.headers['content-type']).toContain('video/mp4');
+      expect(res.headers['content-length']).toBe(String(size));
+      expect(res.headers['content-range']).toBeUndefined();
+    });
+
+    it('returns 409 VIDEO_NOT_READY for a video that is not ready', async () => {
+      const token = await registerConfirmAndLogin('download-409@example.com');
+      // A freshly initiated upload stays in `draft` — not downloadable.
+      const init = await request(app.getHttpServer())
+        .post('/videos')
+        .set('Authorization', `Bearer ${token}`)
+        .send(VALID_BODY)
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .get(`/videos/${init.body.publicId}/download`)
+        .expect(409);
+
+      expect(res.body.error).toBe('VIDEO_NOT_READY');
+    });
+
+    it('returns 404 VIDEO_NOT_FOUND for an unknown publicId', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/videos/doesnotexist/download')
+        .expect(404);
+
+      expect(res.body.error).toBe('VIDEO_NOT_FOUND');
+    });
+  });
 });

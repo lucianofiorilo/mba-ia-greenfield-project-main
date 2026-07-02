@@ -71,6 +71,17 @@ const INVALID_UPLOAD_ERROR_NAMES = new Set([
   'MalformedXML',
 ]);
 
+// The original filename is user input headed into a response header: quotes
+// break the quoted-string, and Node rejects header values outside Latin-1
+// (ERR_INVALID_CHAR). Sanitize to printable ASCII, falling back when empty.
+function toAttachmentFilename(name: string | null, fallback: string): string {
+  const sanitized = (name ?? '')
+    .replace(/["\\]/g, '_')
+    .replace(/[^\x20-\x7e]/g, '_')
+    .trim();
+  return sanitized || fallback;
+}
+
 function isInvalidPartsError(err: unknown): boolean {
   const e = err as {
     name?: string;
@@ -257,15 +268,7 @@ export class VideosService {
     publicId: string,
     range?: string,
   ): Promise<VideoStreamResult> {
-    const video = await this.videoRepository.findOne({
-      where: { public_id: publicId },
-    });
-    if (!video) {
-      throw new VideoNotFoundException();
-    }
-    if (video.status !== VideoStatus.READY) {
-      throw new VideoNotReadyException();
-    }
+    const video = await this.loadReadyVideo(publicId);
 
     const object = await this.storageService.getObjectRange(
       video.storage_key,
@@ -285,6 +288,49 @@ export class VideosService {
     }
 
     return { stream: object.body, status, headers };
+  }
+
+  /**
+   * Open a full read stream of a `ready` video for download — same delivery
+   * path as `openStream` minus the Range support, plus a
+   * `Content-Disposition: attachment` header carrying the original filename.
+   * Anonymous; the video must be `ready`. Never buffered in the API.
+   */
+  async openDownload(publicId: string): Promise<VideoStreamResult> {
+    const video = await this.loadReadyVideo(publicId);
+
+    const object = await this.storageService.getObjectRange(video.storage_key);
+
+    const filename = toAttachmentFilename(
+      video.original_filename,
+      video.public_id,
+    );
+    return {
+      stream: object.body,
+      status: 200,
+      headers: {
+        'Content-Type': object.contentType,
+        'Content-Length': String(object.contentLength),
+        'Content-Disposition': `attachment; filename="${filename}"`,
+      },
+    };
+  }
+
+  /**
+   * Load a video by `public_id` and require it to be `ready` — the shared
+   * precondition for the public delivery endpoints (stream and download).
+   */
+  private async loadReadyVideo(publicId: string): Promise<Video> {
+    const video = await this.videoRepository.findOne({
+      where: { public_id: publicId },
+    });
+    if (!video) {
+      throw new VideoNotFoundException();
+    }
+    if (video.status !== VideoStatus.READY) {
+      throw new VideoNotReadyException();
+    }
+    return video;
   }
 
   /**

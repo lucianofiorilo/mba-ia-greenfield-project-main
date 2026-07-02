@@ -396,6 +396,88 @@ describe('VideosService (unit)', () => {
     });
   });
 
+  describe('openDownload', () => {
+    const readyVideo = (): Partial<Video> => ({
+      public_id: 'pub123',
+      status: VideoStatus.READY,
+      storage_key: 'videos/video-uuid/original/clip.mp4',
+      original_filename: 'clip.mp4',
+    });
+
+    it('throws VideoNotFoundException for an unknown public_id', async () => {
+      repository.findOne.mockResolvedValue(null);
+
+      await expect(service.openDownload('nope')).rejects.toThrow(
+        VideoNotFoundException,
+      );
+      expect(storageService.getObjectRange).not.toHaveBeenCalled();
+    });
+
+    it('throws VideoNotReadyException when the video is not ready', async () => {
+      repository.findOne.mockResolvedValue({
+        ...readyVideo(),
+        status: VideoStatus.PROCESSING,
+      });
+
+      await expect(service.openDownload('pub123')).rejects.toThrow(
+        VideoNotReadyException,
+      );
+      expect(storageService.getObjectRange).not.toHaveBeenCalled();
+    });
+
+    it('returns the full object with a Content-Disposition attachment header', async () => {
+      repository.findOne.mockResolvedValue(readyVideo());
+      const body = Symbol('stream');
+      storageService.getObjectRange.mockResolvedValue({
+        body,
+        contentLength: 11,
+        contentType: 'video/mp4',
+        contentRange: undefined,
+      });
+
+      const result = await service.openDownload('pub123');
+
+      expect(storageService.getObjectRange).toHaveBeenCalledWith(
+        'videos/video-uuid/original/clip.mp4',
+      );
+      expect(result.status).toBe(200);
+      expect(result.stream).toBe(body);
+      expect(result.headers).toEqual({
+        'Content-Type': 'video/mp4',
+        'Content-Length': '11',
+        'Content-Disposition': 'attachment; filename="clip.mp4"',
+      });
+    });
+
+    it('sanitizes the filename and falls back to the public_id when absent', async () => {
+      repository.findOne.mockResolvedValue({
+        ...readyVideo(),
+        original_filename: 'my "vídeo".mp4',
+      });
+      storageService.getObjectRange.mockResolvedValue({
+        body: Symbol('stream'),
+        contentLength: 11,
+        contentType: 'video/mp4',
+        contentRange: undefined,
+      });
+
+      const withUnsafeName = await service.openDownload('pub123');
+      expect(withUnsafeName.headers['Content-Disposition']).toBe(
+        'attachment; filename="my _v_deo_.mp4"',
+      );
+
+      repository.findOne.mockResolvedValue({
+        ...readyVideo(),
+        original_filename: null,
+      });
+
+      const withoutName = await service.openDownload('pub123');
+      expect(withoutName.headers['Content-Disposition']).toBe(
+        'attachment; filename="pub123"',
+      );
+    });
+  });
+
   describe('abortUpload', () => {
     const draft = (): Partial<Video> => ({
       id: 'video-uuid',

@@ -20,7 +20,11 @@ import { ApiErrorEnvelope } from '../common/openapi/api-error-envelope.dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
 import type { JwtPayload } from '../auth/auth.types';
-import { VideosService, type InitiateUploadResult } from './videos.service';
+import {
+  VideosService,
+  type InitiateUploadResult,
+  type VideoStreamResult,
+} from './videos.service';
 import { InitiateUploadDto } from './dto/initiate-upload.dto';
 import { CompleteUploadDto } from './dto/complete-upload.dto';
 import { VideoViewDto } from './dto/video-view.dto';
@@ -239,18 +243,54 @@ export class VideosController {
     @Headers('range') range: string | undefined,
     @Res() res: Response,
   ): Promise<void> {
-    const { stream, status, headers } = await this.videosService.openStream(
-      publicId,
-      range,
-    );
+    const result = await this.videosService.openStream(publicId, range);
+    this.pipeToResponse(res, result);
+  }
 
+  @Public()
+  @Get(':publicId/download')
+  @ApiOperation({
+    summary: 'Download a video',
+    description:
+      'Serves the full video file as an attachment ' +
+      '(`Content-Disposition: attachment; filename="..."`). Bytes are piped ' +
+      'from storage, never buffered in the API. Accessible anonymously; only ' +
+      '`ready` videos.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Full video file served as an attachment',
+    content: { '*/*': { schema: { type: 'string', format: 'binary' } } },
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Video not found',
+    schema: { $ref: getSchemaPath(ApiErrorEnvelope) },
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Video is not ready for download',
+    schema: { $ref: getSchemaPath(ApiErrorEnvelope) },
+  })
+  async download(
+    @Param('publicId') publicId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const result = await this.videosService.openDownload(publicId);
+    this.pipeToResponse(res, result);
+  }
+
+  // Never buffer: pipe the storage stream straight to the client. On an
+  // upstream error, destroy the response so the client sees a broken
+  // connection rather than a hang; if the client disconnects first, tear
+  // down the upstream stream to avoid leaking the storage connection.
+  private pipeToResponse(
+    res: Response,
+    { stream, status, headers }: VideoStreamResult,
+  ): void {
     res.status(status);
     res.set(headers);
 
-    // Never buffer: pipe the storage stream straight to the client. On an
-    // upstream error, destroy the response so the client sees a broken
-    // connection rather than a hang; if the client disconnects first, tear
-    // down the upstream stream to avoid leaking the storage connection.
     stream.on('error', (err) => res.destroy(err));
     res.on('close', () => {
       if (!stream.destroyed) {
